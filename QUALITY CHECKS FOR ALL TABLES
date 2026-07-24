@@ -1,0 +1,109 @@
+-- ============================================================
+-- AML Fraud Detection Database - Data Quality Checks
+-- ============================================================
+-- Description: Validates the cleaned views (vw_CustomersClean,
+-- vw_AccountsClean, vw_TransactionsClean, vw_FraudAlertsClean)
+-- by confirming that the NULL, duplicate, and referential
+-- integrity issues present in the raw source tables no longer
+-- exist after cleaning. Also surfaces informational counts
+-- (e.g. Pending KYC, Unknown categories) that are valid business
+-- states rather than data defects.
+--
+-- Run AFTER views_clean.sql.
+--
+-- Expected result: all "remaining"/"orphaned" checks return 0.
+-- Informational checks (Pending KYC, Unrated, Unknown, etc.) may
+-- return non-zero counts - these reflect genuine data conditions,
+-- not cleaning failures.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- Quick Verification - core NULL / duplicate checks
+-- ------------------------------------------------------------
+SELECT 'Customers: NULL RiskRating remaining' AS Check_, COUNT(*) AS Cnt
+FROM dbo.vw_CustomersClean WHERE RiskRating IS NULL
+UNION ALL
+SELECT 'Accounts: NULL Balance remaining', COUNT(*)
+FROM dbo.vw_AccountsClean WHERE Balance IS NULL
+UNION ALL
+SELECT 'Transactions: duplicate rows remaining', COUNT(*)
+FROM (
+    SELECT AccountID, TransactionDate, Amount, TransactionType, COUNT(*) AS c
+    FROM dbo.vw_TransactionsClean
+    GROUP BY AccountID, TransactionDate, Amount, TransactionType
+    HAVING COUNT(*) > 1
+) x
+UNION ALL
+SELECT 'Customers: duplicate emails remaining', COUNT(*)
+FROM (
+    SELECT Email, COUNT(*) AS c
+    FROM dbo.vw_CustomersClean
+    GROUP BY Email
+    HAVING COUNT(*) > 1
+) y;
+GO
+
+-- ------------------------------------------------------------
+-- Extended Verification - referential integrity and
+-- categorical distribution checks
+-- ------------------------------------------------------------
+SELECT 'Customers: NULL RiskRating remaining' AS Check_, COUNT(*) AS Cnt
+FROM dbo.vw_CustomersClean WHERE RiskRating IS NULL
+UNION ALL
+SELECT 'Accounts: NULL Balance remaining', COUNT(*)
+FROM dbo.vw_AccountsClean WHERE Balance IS NULL
+UNION ALL
+SELECT 'Transactions: duplicate rows remaining', COUNT(*)
+FROM (
+    SELECT AccountID, TransactionDate, Amount, TransactionType, COUNT(*) AS c
+    FROM dbo.vw_TransactionsClean
+    GROUP BY AccountID, TransactionDate, Amount, TransactionType
+    HAVING COUNT(*) > 1
+) AS dup
+UNION ALL
+SELECT 'Customers: duplicate emails remaining', COUNT(*)
+FROM (
+    SELECT Email, COUNT(*) AS c
+    FROM dbo.vw_CustomersClean
+    GROUP BY Email
+    HAVING COUNT(*) > 1
+) AS dupEmail
+UNION ALL
+-- Referential integrity checks
+SELECT 'Accounts: orphaned CustomerID (no matching customer)', COUNT(*)
+FROM dbo.vw_AccountsClean a
+WHERE NOT EXISTS (
+    SELECT 1 FROM dbo.vw_CustomersClean c WHERE c.CustomerID = a.CustomerID
+)
+UNION ALL
+SELECT 'Transactions: orphaned AccountID (no matching account)', COUNT(*)
+FROM dbo.vw_TransactionsClean t
+WHERE NOT EXISTS (
+    SELECT 1 FROM dbo.vw_AccountsClean a WHERE a.AccountID = t.AccountID
+)
+UNION ALL
+SELECT 'FraudAlerts: orphaned TransactionID (no matching transaction)', COUNT(*)
+FROM dbo.vw_FraudAlertsClean f
+WHERE NOT EXISTS (
+    SELECT 1 FROM dbo.vw_TransactionsClean t WHERE t.TransactionID = f.TransactionID
+)
+UNION ALL
+-- Informational distribution checks
+SELECT 'Customers: Unrated RiskRating count', COUNT(*)
+FROM dbo.vw_CustomersClean WHERE RiskRating = 'Unrated'
+UNION ALL
+SELECT 'Customers: Pending KYC_Status count', COUNT(*)
+FROM dbo.vw_CustomersClean WHERE KYC_Status = 'Pending'
+UNION ALL
+SELECT 'Accounts: Unknown AccountType remaining', COUNT(*)
+FROM dbo.vw_AccountsClean WHERE AccountType = 'Unknown'
+UNION ALL
+SELECT 'Accounts: Unknown AccountStatus remaining', COUNT(*)
+FROM dbo.vw_AccountsClean WHERE AccountStatus = 'Unknown'
+UNION ALL
+SELECT 'Transactions: negative Amount values', COUNT(*)
+FROM dbo.vw_TransactionsClean WHERE Amount < 0
+UNION ALL
+SELECT 'Transactions: future-dated TransactionDate', COUNT(*)
+FROM dbo.vw_TransactionsClean WHERE TransactionDate > GETDATE();
+GO
