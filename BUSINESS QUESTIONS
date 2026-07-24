@@ -1,0 +1,176 @@
+-- ============================================================
+-- AML Fraud Detection Database - Fraud Analysis Queries
+-- ============================================================
+-- Description: Analytical SQL queries built on top of the
+-- cleaned views (vw_CustomersClean, vw_AccountsClean,
+-- vw_TransactionsClean, vw_FraudAlertsClean) to answer common
+-- AML (Anti-Money Laundering) business and compliance questions.
+-- Each query targets a specific fraud typology or monitoring
+-- requirement used by AML analysts and investigators.
+--
+-- Run AFTER schema_ddl.sql, seed_data.sql, and views_clean.sql.
+--
+-- Queries included:
+--   1. Structuring detection (sub-threshold deposits in a
+--      7-day window)
+--   2. High-risk-jurisdiction transactions over $10,000
+--   3. Accounts generating the most fraud alerts
+--   4. Fraud alert status distribution (%)
+--   5. High-risk customers with multiple accounts and
+--      incomplete KYC
+--   6. Dormant accounts showing transaction activity
+--   7. Total transaction volume by branch and month
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 1. Structuring Detection
+-- ------------------------------------------------------------
+-- Business question: Which accounts made 3 or more cash deposits
+-- just under the $10,000 reporting threshold within a 7-day
+-- window? (a classic "structuring"/"smurfing" red flag)
+-- ------------------------------------------------------------
+WITH StructuringSummary AS (
+    SELECT
+        AccountID,
+        COUNT(*)                                                    AS SubThresholdTxnCount,
+        SUM(Amount)                                                 AS TotalAmount,
+        MIN(TransactionDate)                                        AS FirstTxnDate,
+        MAX(TransactionDate)                                        AS LastTxnDate,
+        DATEDIFF(DAY, MIN(TransactionDate), MAX(TransactionDate))   AS SpanDays
+    FROM dbo.vw_TransactionsClean
+    WHERE TransactionType = 'DEPOSIT'
+      AND Amount BETWEEN 9000 AND 9999.99
+    GROUP BY AccountID
+)
+SELECT
+    s.AccountID,
+    c.FullName,
+    c.Country,
+    s.SubThresholdTxnCount,
+    s.TotalAmount,
+    s.SpanDays
+FROM StructuringSummary AS s
+JOIN dbo.vw_AccountsClean AS a ON a.AccountID = s.AccountID
+JOIN dbo.vw_CustomersClean AS c ON c.CustomerID = a.CustomerID
+WHERE s.SubThresholdTxnCount >= 3
+  AND s.SpanDays <= 7
+ORDER BY s.SubThresholdTxnCount DESC;
+GO
+
+-- ------------------------------------------------------------
+-- 2. High-Risk-Jurisdiction Transactions
+-- ------------------------------------------------------------
+-- Business question: Which transactions over $10,000 involve a
+-- counterparty in a high-risk jurisdiction?
+-- ------------------------------------------------------------
+SELECT
+    t.TransactionID,
+    c.FullName,
+    c.Country          AS CustomerCountry,
+    t.CounterpartyCountry,
+    t.Amount,
+    t.TransactionType,
+    t.Channel,
+    t.TransactionDate
+FROM dbo.vw_TransactionsClean AS t
+JOIN dbo.vw_AccountsClean AS a ON a.AccountID = t.AccountID
+JOIN dbo.vw_CustomersClean AS c ON c.CustomerID = a.CustomerID
+JOIN (VALUES ('IRAN'), ('NORTH KOREA'), ('RUSSIA'), ('UAE')) AS h(country)
+     ON h.country = t.CounterpartyCountry
+WHERE t.Amount > 10000
+ORDER BY t.Amount DESC;
+GO
+
+-- ------------------------------------------------------------
+-- 3. Accounts With the Most Fraud Alerts
+-- ------------------------------------------------------------
+-- Business question: Which accounts have generated the most
+-- fraud alerts, and what is their combined alerted amount?
+-- ------------------------------------------------------------
+SELECT
+    t.AccountID,
+    c.FullName,
+    COUNT(*)       AS AlertCount,
+    SUM(t.Amount)  AS TotalAlertedAmount
+FROM dbo.vw_FraudAlertsClean AS fa
+JOIN dbo.vw_TransactionsClean AS t ON t.TransactionID = fa.TransactionID
+JOIN dbo.vw_AccountsClean AS a ON a.AccountID = t.AccountID
+JOIN dbo.vw_CustomersClean AS c ON c.CustomerID = a.CustomerID
+GROUP BY t.AccountID, c.FullName
+ORDER BY AlertCount DESC, TotalAlertedAmount DESC;
+GO
+
+-- ------------------------------------------------------------
+-- 4. Fraud Alert Status Distribution
+-- ------------------------------------------------------------
+-- Business question: Of all fraud alerts raised, what
+-- percentage are Open, Closed, Escalated, or False Positive?
+-- ------------------------------------------------------------
+SELECT
+    Status,
+    COUNT(*) AS AlertCount,
+    CAST(ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS DECIMAL(5,1)) AS PercentOfTotal
+FROM dbo.vw_FraudAlertsClean
+GROUP BY Status
+ORDER BY AlertCount DESC;
+GO
+
+-- ------------------------------------------------------------
+-- 5. High-Risk Customers With Multiple Accounts / Incomplete KYC
+-- ------------------------------------------------------------
+-- Business question: Which High-risk-rated customers hold more
+-- than one account, and what is their combined balance? Flagged
+-- as higher AML monitoring priority, especially where KYC
+-- verification is not yet complete.
+-- ------------------------------------------------------------
+SELECT
+    c.CustomerID,
+    c.FullName,
+    c.RiskRating,
+    c.KYC_Status,
+    COUNT(*)       AS AccountCount,
+    SUM(a.Balance) AS CombinedBalance
+FROM dbo.vw_AccountsClean AS a
+JOIN dbo.vw_CustomersClean AS c ON c.CustomerID = a.CustomerID
+WHERE c.RiskRating = 'High'
+  AND c.KYC_Status IN ('Pending', 'Not Verified')
+GROUP BY c.CustomerID, c.FullName, c.RiskRating, c.KYC_Status
+ORDER BY CombinedBalance DESC;
+GO
+
+-- ------------------------------------------------------------
+-- 6. Dormant Account Reactivation
+-- ------------------------------------------------------------
+-- Business question: Which accounts marked DORMANT show
+-- transaction activity, and how large was that activity?
+-- ------------------------------------------------------------
+SELECT
+    a.AccountID,
+    c.FullName,
+    a.Branch,
+    t.TransactionID,
+    t.Amount,
+    t.TransactionDate
+FROM dbo.vw_TransactionsClean AS t
+JOIN dbo.vw_AccountsClean AS a ON a.AccountID = t.AccountID
+JOIN dbo.vw_CustomersClean AS c ON c.CustomerID = a.CustomerID
+WHERE a.AccountStatus = 'DORMANT'
+ORDER BY t.Amount DESC;
+GO
+
+-- ------------------------------------------------------------
+-- 7. Transaction Volume by Branch and Month
+-- ------------------------------------------------------------
+-- Business question: What is the total transaction volume, per
+-- branch, per month? Used for baseline volume monitoring.
+-- ------------------------------------------------------------
+SELECT
+    a.Branch,
+    FORMAT(t.TransactionDate, 'yyyy-MM') AS TxnMonth,
+    COUNT(*)                             AS TxnCount,
+    SUM(t.Amount)                        AS TotalVolume
+FROM dbo.vw_TransactionsClean AS t
+JOIN dbo.vw_AccountsClean AS a ON a.AccountID = t.AccountID
+GROUP BY a.Branch, FORMAT(t.TransactionDate, 'yyyy-MM')
+ORDER BY a.Branch, TxnMonth;
+GO
