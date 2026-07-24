@@ -1,0 +1,154 @@
+-- ============================================================
+-- AML Fraud Detection Database - Data Cleaning Views
+-- ============================================================
+-- Description: Creates analysis-ready views on top of the raw
+-- Customers, Accounts, Transactions, and FraudAlerts tables.
+-- Each view standardizes text casing/whitespace, resolves NULLs
+-- with sensible defaults, deduplicates records, and normalizes
+-- categorical values (e.g. RiskRating, KYC_Status, AccountType,
+-- AccountStatus, Alert Status) into a consistent set of labels -
+-- without modifying the underlying source tables.
+--
+-- Views created:
+--   1. dbo.vw_CustomersClean
+--   2. dbo.vw_AccountsClean
+--   3. dbo.vw_TransactionsClean
+--   4. dbo.vw_FraudAlertsClean
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- View: vw_CustomersClean
+-- ------------------------------------------------------------
+-- Cleans and standardizes customer records:
+--   - Uppercases/trims FullName and Country (strips '.' from Country)
+--   - Lowercases/trims Email
+--   - Fills missing DOB with a placeholder date (1900-01-01)
+--   - Normalizes RiskRating to Low / Medium / High / N\A
+--   - Normalizes KYC_Status to Verified / Pending / Not Verified
+--   - Deduplicates customers by Email, keeping the earliest CustomerID
+-- ------------------------------------------------------------
+CREATE OR ALTER VIEW dbo.vw_CustomersClean AS
+SELECT
+    CustomerID, FullName, DOB, Country, Email, Phone, RiskRating, KYC_Status, CreatedDate
+FROM (
+    SELECT
+        CustomerID,
+        UPPER(TRIM(FullName))                          AS FullName,
+        COALESCE(DOB, CAST('1900-01-01' AS DATE))       AS DOB,
+        UPPER(TRIM(REPLACE(Country, '.', '')))          AS Country,
+        LOWER(TRIM(Email))                              AS Email,
+        Phone,
+        CASE
+            WHEN LOWER(TRIM(COALESCE(RiskRating, ''))) = 'low'    THEN 'Low'
+            WHEN LOWER(TRIM(COALESCE(RiskRating, ''))) = 'medium' THEN 'Medium'
+            WHEN LOWER(TRIM(COALESCE(RiskRating, ''))) = 'high'   THEN 'High'
+            ELSE 'N\A'
+        END AS RiskRating,
+        CASE
+            WHEN LOWER(TRIM(COALESCE(KYC_Status, ''))) = 'verified'     THEN 'Verified'
+            WHEN LOWER(TRIM(COALESCE(KYC_Status, ''))) = 'pending'      THEN 'Pending'
+            WHEN LOWER(TRIM(COALESCE(KYC_Status, ''))) = 'not verified' THEN 'Not Verified'
+            ELSE 'Pending'
+        END AS KYC_Status,
+        CreatedDate,
+        ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(Email)) ORDER BY CustomerID ASC) AS rn
+    FROM dbo.Customers
+) t
+WHERE rn = 1;
+GO
+
+-- ------------------------------------------------------------
+-- View: vw_AccountsClean
+-- ------------------------------------------------------------
+-- Cleans and standardizes account records:
+--   - Remaps known duplicate CustomerIDs to their canonical ID
+--   - Normalizes AccountType to Savings / Current / Fixed Deposit
+--   - Fills missing Balance with 0.00
+--   - Normalizes AccountStatus to Active / Dormant / Closed
+--   - Uppercases/trims Branch
+-- ------------------------------------------------------------
+CREATE OR ALTER VIEW dbo.vw_AccountsClean AS
+SELECT
+    AccountID,
+    CASE
+        WHEN CustomerID = 4  THEN 3   -- duplicate of customer 3 (John Smith)
+        WHEN CustomerID = 15 THEN 14  -- duplicate of customer 14 (Grace Owusu)
+        ELSE CustomerID
+    END AS CustomerID,
+    CASE
+        WHEN UPPER(TRIM(AccountType)) IN ('SAVINGS', 'SAVING') THEN 'Savings'
+        WHEN UPPER(TRIM(AccountType)) IN ('CURRENT', 'CURR')   THEN 'Current'
+        WHEN UPPER(TRIM(AccountType)) LIKE 'FIXED%'            THEN 'Fixed Deposit'
+        ELSE 'Unknown'
+    END AS AccountType,
+    CAST(COALESCE(Balance, 0.00) AS DECIMAL(18,2)) AS Balance,
+    OpenDate,
+    CASE
+        WHEN UPPER(TRIM(AccountStatus)) IN ('ACTIVE', 'ACTV')  THEN 'Active'
+        WHEN UPPER(TRIM(AccountStatus)) IN ('DORMANT', 'DORM') THEN 'Dormant'
+        WHEN UPPER(TRIM(AccountStatus)) IN ('CLOSED', 'CLOSE') THEN 'Closed'
+        ELSE 'Unknown'
+    END AS AccountStatus,
+    UPPER(TRIM(Branch)) AS Branch
+FROM dbo.Accounts;
+GO
+
+-- ------------------------------------------------------------
+-- View: vw_TransactionsClean
+-- ------------------------------------------------------------
+-- Cleans and standardizes transaction records:
+--   - Casts TransactionDate to DATE (drops time component)
+--   - Uppercases/trims TransactionType, Channel, CounterpartyCountry
+--   - Fills missing Description with a placeholder value
+--   - Deduplicates transactions by AccountID, TransactionDate,
+--     Amount, and TransactionType - keeping the earliest TransactionID
+-- ------------------------------------------------------------
+CREATE OR ALTER VIEW dbo.vw_TransactionsClean AS
+SELECT
+    TransactionID, AccountID, TransactionDate, Amount, TransactionType,
+    Channel, CounterpartyCountry, Description
+FROM (
+    SELECT
+        TransactionID,
+        AccountID,
+        CAST(TransactionDate AS DATE)                            AS TransactionDate,
+        Amount,
+        UPPER(TRIM(TransactionType))                             AS TransactionType,
+        UPPER(TRIM(Channel))                                     AS Channel,
+        UPPER(TRIM(CounterpartyCountry))                         AS CounterpartyCountry,
+        COALESCE(TRIM(Description), 'No description provided')  AS Description,
+        ROW_NUMBER() OVER (
+            PARTITION BY AccountID, TransactionDate, Amount, UPPER(TRIM(TransactionType))
+            ORDER BY TransactionID ASC
+        ) AS rn
+    FROM dbo.Transactions
+) t
+WHERE rn = 1;
+GO
+
+-- ------------------------------------------------------------
+-- View: vw_FraudAlertsClean
+-- ------------------------------------------------------------
+-- Cleans and standardizes fraud alert records:
+--   - Trims AlertType
+--   - Normalizes Status to Open / Closed / Escalated / False Positive
+--   - Fills missing Notes with a placeholder value
+--   - Restricts results to alerts linked to a valid cleaned transaction
+-- ------------------------------------------------------------
+CREATE OR ALTER VIEW dbo.vw_FraudAlertsClean AS
+SELECT
+    AlertID,
+    TransactionID,
+    TRIM(AlertType) AS AlertType,
+    AlertDate,
+    CASE
+        WHEN LOWER(TRIM(Status)) = 'open'            THEN 'Open'
+        WHEN LOWER(TRIM(Status)) = 'closed'          THEN 'Closed'
+        WHEN LOWER(TRIM(Status)) = 'escalated'       THEN 'Escalated'
+        WHEN LOWER(TRIM(Status)) = 'false positive'  THEN 'False Positive'
+        ELSE 'Open'
+    END AS Status,
+    COALESCE(TRIM(Notes), 'No notes provided') AS Notes
+FROM dbo.FraudAlerts
+WHERE TransactionID IN (SELECT TransactionID FROM dbo.vw_TransactionsClean);
+GO
