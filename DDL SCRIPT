@@ -1,0 +1,77 @@
+-- ============================================================
+-- AML Fraud Detection Database - Schema DDL Script
+-- ============================================================
+-- Description: Creates the core tables for the AML Fraud
+-- Detection project - Customers, Accounts, Transactions,
+-- and FraudAlerts - with foreign key relationships.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- Drop Existing Tables (in dependency order)
+-- ------------------------------------------------------------
+IF OBJECT_ID('dbo.FraudAlerts', 'U')  IS NOT NULL DROP TABLE dbo.FraudAlerts;
+IF OBJECT_ID('dbo.Transactions', 'U') IS NOT NULL DROP TABLE dbo.Transactions;
+IF OBJECT_ID('dbo.Accounts', 'U')     IS NOT NULL DROP TABLE dbo.Accounts;
+IF OBJECT_ID('dbo.Customers', 'U')    IS NOT NULL DROP TABLE dbo.Customers;
+GO
+
+-- ------------------------------------------------------------
+-- Table: Customers
+-- ------------------------------------------------------------
+CREATE TABLE dbo.Customers (
+    CustomerID    INT             NOT NULL PRIMARY KEY,
+    FullName      VARCHAR(100)    NULL,
+    DOB           DATE            NULL,
+    Country       VARCHAR(50)     NULL,
+    Email         VARCHAR(100)    NULL,
+    Phone         VARCHAR(20)     NULL,
+    RiskRating    VARCHAR(10)     NULL,
+    KYC_Status    VARCHAR(20)     NULL,
+    CreatedDate   DATE            NULL
+);
+
+-- ------------------------------------------------------------
+-- Table: Accounts
+-- ------------------------------------------------------------
+CREATE TABLE dbo.Accounts (
+    AccountID      INT            NOT NULL PRIMARY KEY,
+    CustomerID     INT            NOT NULL,
+    AccountType    VARCHAR(20)    NULL,
+    Balance        DECIMAL(18,2)  NULL,
+    OpenDate       DATE           NULL,
+    AccountStatus  VARCHAR(20)    NULL,
+    Branch         VARCHAR(50)    NULL,
+    CONSTRAINT FK_Accounts_Customers
+        FOREIGN KEY (CustomerID) REFERENCES dbo.Customers(CustomerID)
+);
+
+-- ------------------------------------------------------------
+-- Table: Transactions
+-- ------------------------------------------------------------
+CREATE TABLE dbo.Transactions (
+    TransactionID        INT            NOT NULL PRIMARY KEY,
+    AccountID            INT            NOT NULL,
+    TransactionDate       DATE          NULL,
+    Amount                DECIMAL(18,2) NULL,
+    TransactionType       VARCHAR(20)   NULL,
+    Channel               VARCHAR(20)   NULL,
+    CounterpartyCountry   VARCHAR(50)   NULL,
+    Description           VARCHAR(200)  NULL,
+    CONSTRAINT FK_Transactions_Accounts
+        FOREIGN KEY (AccountID) REFERENCES dbo.Accounts(AccountID)
+);
+
+-- ------------------------------------------------------------
+-- Table: FraudAlerts
+-- ------------------------------------------------------------
+CREATE TABLE dbo.FraudAlerts (
+    AlertID         INT            NOT NULL PRIMARY KEY,
+    TransactionID   INT            NOT NULL,
+    AlertType       VARCHAR(50)    NULL,
+    AlertDate       DATE           NULL,
+    Status          VARCHAR(20)    NULL,
+    Notes           VARCHAR(200)   NULL,
+    CONSTRAINT FK_FraudAlerts_Transactions
+        FOREIGN KEY (TransactionID) REFERENCES dbo.Transactions(TransactionID)
+);
+GO
